@@ -96,8 +96,10 @@ void BMX055_Magn::get_event(cereal::SensorEventData::Builder &event){
     event.setTimestamp(start_time);
 
     float xyz[] = {x, y, z};
+    kj::ArrayPtr<const float> vs(&xyz[0], 3);
+
     auto svec = event.initMagneticUncalibrated();
-    svec.setV(xyz);
+    svec.setV(vs);
     svec.setStatus(true);
   }
 

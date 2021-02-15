@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 from cereal import car
-from selfdrive.car.chrysler.values import Ecu, ECU_FINGERPRINT, CAR, FINGERPRINTS
-from selfdrive.car import STD_CARGO_KG, scale_rot_inertia, scale_tire_stiffness, is_ecu_disconnected, gen_empty_fingerprint
+from selfdrive.car.chrysler.values import CAR
+from selfdrive.car import STD_CARGO_KG, scale_rot_inertia, scale_tire_stiffness, gen_empty_fingerprint
 from selfdrive.car.interfaces import CarInterfaceBase
-from common.dp_common import common_interface_atl, common_interface_get_params_lqr
+
 
 class CarInterface(CarInterfaceBase):
   @staticmethod
@@ -11,14 +11,13 @@ class CarInterface(CarInterfaceBase):
     return float(accel) / 3.0
 
   @staticmethod
-  def get_params(candidate, fingerprint=None, has_relay=False, car_fw=None):
+  def get_params(candidate, fingerprint=None, car_fw=None):
     if fingerprint is None:
       fingerprint = gen_empty_fingerprint()
 
     ret = CarInterfaceBase.get_std_params(candidate, fingerprint)
     ret.carName = "chrysler"
     ret.safetyModel = car.CarParams.SafetyModel.chrysler
-    ret.lateralTuning.init('pid')
 
     # Chrysler port is a community feature, since we don't own one to test
     ret.communityFeature = True
@@ -39,9 +38,6 @@ class CarInterface(CarInterfaceBase):
       ret.steerRatio = 12.7
       ret.steerActuatorDelay = 0.2  # in seconds
 
-    # dp
-    ret = common_interface_get_params_lqr(ret)
-
     ret.centerToFront = ret.wheelbase * 0.44
 
     ret.minSteerSpeed = 3.8  # m/s
@@ -56,21 +52,18 @@ class CarInterface(CarInterfaceBase):
     # mass and CG position, so all cars will have approximately similar dyn behaviors
     ret.tireStiffnessFront, ret.tireStiffnessRear = scale_tire_stiffness(ret.mass, ret.wheelbase, ret.centerToFront)
 
-    ret.enableCamera = is_ecu_disconnected(fingerprint[0], FINGERPRINTS, ECU_FINGERPRINT, candidate, Ecu.fwdCamera) or has_relay
-    print("ECU Camera Simulated: {0}".format(ret.enableCamera))
+    ret.enableCamera = True
 
     return ret
 
   # returns a car.CarState
-  def update(self, c, can_strings, dragonconf):
+  def update(self, c, can_strings):
     # ******************* do can recv *******************
     self.cp.update_strings(can_strings)
     self.cp_cam.update_strings(can_strings)
 
     ret = self.CS.update(self.cp, self.cp_cam)
-    # dp
-    self.dragonconf = dragonconf
-    ret.cruiseState.enabled = common_interface_atl(ret, dragonconf.dpAtl)
+
     ret.canValid = self.cp.can_valid and self.cp_cam.can_valid
 
     # speeds
@@ -97,6 +90,6 @@ class CarInterface(CarInterfaceBase):
     if (self.CS.frame == -1):
       return []  # if we haven't seen a frame 220, then do not update.
 
-    can_sends = self.CC.update(c.enabled, self.CS, c.actuators, c.cruiseControl.cancel, c.hudControl.visualAlert, self.dragonconf)
+    can_sends = self.CC.update(c.enabled, self.CS, c.actuators, c.cruiseControl.cancel, c.hudControl.visualAlert)
 
     return can_sends

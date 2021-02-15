@@ -53,8 +53,10 @@ void LSM6DS3_Accel::get_event(cereal::SensorEventData::Builder &event){
   event.setTimestamp(start_time);
 
   float xyz[] = {y, -x, z};
+  kj::ArrayPtr<const float> vs(&xyz[0], 3);
+
   auto svec = event.initAcceleration();
-  svec.setV(xyz);
+  svec.setV(vs);
   svec.setStatus(true);
 
 }

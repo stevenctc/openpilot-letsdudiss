@@ -7,6 +7,7 @@
 #define nvgCreate nvgCreateGL3
 #else
 #include <GLES3/gl3.h>
+#include <EGL/egl.h>
 #define NANOVG_GLES3_IMPLEMENTATION
 #define nvgCreate nvgCreateGLES3
 #endif
@@ -32,7 +33,6 @@
 #define COLOR_WHITE_ALPHA(x) nvgRGBA(255, 255, 255, x)
 #define COLOR_YELLOW nvgRGBA(218, 202, 37, 255)
 #define COLOR_RED nvgRGBA(201, 34, 49, 255)
-#define COLOR_RED_ALPHA(x) nvgRGBA(201, 34, 49, x)
 
 #define UI_BUF_COUNT 4
 
@@ -55,27 +55,11 @@ const Rect home_btn = {60, 1080 - 180 - 40, 180, 180};
 
 const int UI_FREQ = 20;   // Hz
 
-const int MODEL_PATH_MAX_VERTICES_CNT = TRAJECTORY_SIZE*2;
-const int TRACK_POINTS_MAX_CNT = TRAJECTORY_SIZE*4;
+const int MODEL_PATH_MAX_VERTICES_CNT = 98;
+const int MODEL_LANE_PATH_CNT = 2;
+const int TRACK_POINTS_MAX_CNT = 50 * 2;
 
 const int SET_SPEED_NA = 255;
-
-// dp - dynamic follow btn
-const int df_btn_h = 180;
-const int df_btn_w = 180;
-const int df_btn_x = 1650;
-const int df_btn_y = 750;
-// dp - accel profile btn
-const int ap_btn_h = 180;
-const int ap_btn_w = 180;
-const int ap_btn_x = 1450;
-const int ap_btn_y = 750;
-const int info_bar_h = 80;
-// dp - rec btn
-const int rec_btn_h = 130;
-const int rec_btn_w = 180;
-const int rec_btn_x = 870;
-const int rec_btn_y = 800;
 
 typedef enum NetStatus {
   NET_CONNECTED,
@@ -99,14 +83,10 @@ static std::map<UIStatus, NVGcolor> bg_colors = {
   {STATUS_ALERT, nvgRGBA(0xC9, 0x22, 0x31, 0xf1)},
 };
 
-typedef struct {
-  float x[TRAJECTORY_SIZE];
-  float y[TRAJECTORY_SIZE];
-  float z[TRAJECTORY_SIZE];
-} line;
-
-
 typedef struct UIScene {
+
+  float mpc_x[50];
+  float mpc_y[50];
 
   mat4 extrinsic_matrix;      // Last row is 0 so we can use mat4.
   bool world_objects_visible;
@@ -116,6 +96,7 @@ typedef struct UIScene {
   bool uilayout_sidebarcollapsed;
   // responsive layout
   Rect viz_rect;
+  int ui_viz_ro;
 
   std::string alert_text1;
   std::string alert_text2;
@@ -131,60 +112,10 @@ typedef struct UIScene {
   cereal::ControlsState::Reader controls_state;
   cereal::DriverState::Reader driver_state;
   cereal::DMonitoringState::Reader dmonitoring_state;
-  cereal::ModelDataV2::Reader model;
-  line path;
-  line outer_left_lane_line;
-  line left_lane_line;
-  line right_lane_line;
-  line outer_right_lane_line;
-  line left_road_edge;
-  line right_road_edge;
-  float max_distance;
-  float lane_line_probs[4];
-  float road_edge_stds[2];
-
-  // dp
-  bool dpDashcam;
-  bool dpDashcamUi;
-  bool dpFullScreenApp;
-  bool dpDrivingUi;
-  bool dpUiScreenOffReversing;
-  bool dpUiScreenOffDriving;
-  bool dpUiSpeed;
-  bool dpUiEvent;
-  bool dpUiMaxSpeed;
-  bool dpUiFace;
-  bool dpUiLane;
-  bool dpUiPath;
-  bool dpUiLead;
-  bool dpUiDev;
-  bool dpUiDevMini;
-  bool dpUiBlinker;
-  int dpUiBrightness;
-  int dpUiVolumeBoost;
-  std::string dpIpAddr;
-  // for minimal UI
-  float angleSteersDes;
-  float angleSteers;
-  // for black screen on reversing
-  bool isReversing;
-  // for blinker, from kegman
-  bool leftBlinker;
-  bool rightBlinker;
-  bool brakeLights;
-  int blinker_blinkingrate;
-  // for blind spot
-  bool leftBlindspot;
-  bool rightBlindspot;
-
-  // for updating icon
-  int dp_alert_rate;
-  int dp_alert_type;
-  std::string dpLocale;
-  bool dpIsUpdating;
-  bool dpAthenad;
-  int dpDynamicFollow;
-  int dpAccelProfile;
+  cereal::ModelData::Reader model;
+  float left_lane_points[MODEL_PATH_DISTANCE];
+  float path_points[MODEL_PATH_DISTANCE];
+  float right_lane_points[MODEL_PATH_DISTANCE];
 } UIScene;
 
 typedef struct {
@@ -194,7 +125,7 @@ typedef struct {
 typedef struct {
   vertex_data v[MODEL_PATH_MAX_VERTICES_CNT];
   int cnt;
-} line_vertices_data;
+} model_path_vertices_data;
 
 typedef struct {
   vertex_data v[TRACK_POINTS_MAX_CNT];
@@ -211,7 +142,6 @@ typedef struct UIState {
   NVGcontext *vg;
 
   // fonts and images
-  int font_courbd;
   int font_sans_regular;
   int font_sans_semibold;
   int font_sans_bold;
@@ -260,9 +190,8 @@ typedef struct UIState {
   bool alert_blinked;
   float alert_blinking_alpha;
 
-  track_vertices_data track_vertices;
-  line_vertices_data lane_line_vertices[4];
-  line_vertices_data road_edge_vertices[2];
+  track_vertices_data track_vertices[2];
+  model_path_vertices_data model_path_vertices[MODEL_LANE_PATH_CNT * 2];
 
   Rect video_rect;
 } UIState;

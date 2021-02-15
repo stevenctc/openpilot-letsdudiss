@@ -1,22 +1,19 @@
 import os
 import time
-from typing import Dict
-
 from cereal import car
 from common.kalman.simple_kalman import KF1D
 from common.realtime import DT_CTRL
 from selfdrive.car import gen_empty_fingerprint
 from selfdrive.config import Conversions as CV
-from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX
 from selfdrive.controls.lib.events import Events
 from selfdrive.controls.lib.vehicle_model import VehicleModel
+from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX
 
 GearShifter = car.CarState.GearShifter
 EventName = car.CarEvent.EventName
 MAX_CTRL_SPEED = (V_CRUISE_MAX + 4) * CV.KPH_TO_MS  # 144 + 4 = 92 mph
 
 # generic car and radar interfaces
-
 
 class CarInterfaceBase():
   def __init__(self, CP, CarController, CarState):
@@ -36,8 +33,6 @@ class CarInterfaceBase():
     if CarController is not None:
       self.CC = CarController(self.cp.dbc_name, CP, self.VM)
 
-    self.dragonconf = None
-
   @staticmethod
   def calc_accel_override(a_ego, a_target, v_ego, v_target):
     return 1.
@@ -47,15 +42,15 @@ class CarInterfaceBase():
     raise NotImplementedError
 
   @staticmethod
-  def get_params(candidate, fingerprint=gen_empty_fingerprint(), has_relay=False, car_fw=None):
+  def get_params(candidate, fingerprint=gen_empty_fingerprint(), car_fw=None):
     raise NotImplementedError
 
   # returns a set of default params to avoid repetition in car specific params
   @staticmethod
-  def get_std_params(candidate, fingerprint, has_relay):
+  def get_std_params(candidate, fingerprint):
     ret = car.CarParams.new_message()
     ret.carFingerprint = candidate
-    ret.isPandaBlack = has_relay
+    ret.isPandaBlack = True # TODO: deprecate this field
 
     # standard ALC params
     ret.steerControlType = car.CarParams.SteerControlType.torque
@@ -73,9 +68,6 @@ class CarInterfaceBase():
     ret.brakeMaxV = [1.]
     ret.openpilotLongitudinalControl = False
     ret.startAccel = 0.0
-    ret.minSpeedCan = 0.3
-    ret.stoppingBrakeRate = 0.2 # brake_travel/s while trying to stop
-    ret.startingBrakeRate = 0.8 # brake_travel/s while releasing on restart
     ret.stoppingControl = False
     ret.longitudinalTuning.deadzoneBP = [0.]
     ret.longitudinalTuning.deadzoneV = [0.]
@@ -86,7 +78,7 @@ class CarInterfaceBase():
     return ret
 
   # returns a car.CarState, pass in car.CarControl
-  def update(self, c, can_strings, dragonconf):
+  def update(self, c, can_strings):
     raise NotImplementedError
 
   # return sendcan, pass in a car.CarControl
@@ -100,30 +92,26 @@ class CarInterfaceBase():
       events.add(EventName.doorOpen)
     if cs_out.seatbeltUnlatched:
       events.add(EventName.seatbeltNotLatched)
-    if self.dragonconf.dpGearCheck and cs_out.gearShifter != GearShifter.drive and cs_out.gearShifter not in extra_gears:
+    if cs_out.gearShifter != GearShifter.drive and cs_out.gearShifter not in extra_gears:
       events.add(EventName.wrongGear)
     if cs_out.gearShifter == GearShifter.reverse:
       events.add(EventName.reverseGear)
-    if not self.dragonconf.dpAtl and not cs_out.cruiseState.available:
+    if not cs_out.cruiseState.available:
       events.add(EventName.wrongCarMode)
     if cs_out.espDisabled:
       events.add(EventName.espDisabled)
-    if cs_out.gasPressed and not self.dragonconf.dpAllowGas and not self.dragonconf.dpAtl:
+    if cs_out.gasPressed:
       events.add(EventName.gasPressed)
     if cs_out.stockFcw:
       events.add(EventName.stockFcw)
     if cs_out.stockAeb:
       events.add(EventName.stockAeb)
-    if cs_out.vEgo > self.dragonconf.dpMaxCtrlSpeed:
+    if cs_out.vEgo > MAX_CTRL_SPEED:
       events.add(EventName.speedTooHigh)
     if cs_out.cruiseState.nonAdaptive:
       events.add(EventName.wrongCruiseMode)
 
-    if not self.dragonconf.dpLatCtrl:
-      events.add(EventName.manualSteeringRequired)
-    elif self.dragonconf.dpSteeringOnSignal and (cs_out.leftBlinker or cs_out.rightBlinker):
-      events.add(EventName.manualSteeringRequiredBlinkersOn)
-    elif cs_out.steerError:
+    if cs_out.steerError:
       events.add(EventName.steerUnavailable)
     elif cs_out.steerWarning:
       events.add(EventName.steerTempUnavailable)
@@ -131,15 +119,9 @@ class CarInterfaceBase():
     # Disable on rising edge of gas or brake. Also disable on brake when speed > 0.
     # Optionally allow to press gas at zero speed to resume.
     # e.g. Chrysler does not spam the resume button yet, so resuming with gas is handy. FIXME!
-    if self.dragonconf.dpAtl:
-      pass
-    elif self.dragonconf.dpAllowGas:
-      if cs_out.brakePressed and (not self.CS.out.brakePressed or not cs_out.standstill):
-        events.add(EventName.pedalPressed)
-    else:
-      if (cs_out.gasPressed and (not self.CS.out.gasPressed) and cs_out.vEgo > gas_resume_speed) or \
-         (cs_out.brakePressed and (not self.CS.out.brakePressed or not cs_out.standstill)):
-        events.add(EventName.pedalPressed)
+    if (cs_out.gasPressed and (not self.CS.out.gasPressed) and cs_out.vEgo > gas_resume_speed) or \
+       (cs_out.brakePressed and (not self.CS.out.brakePressed or not cs_out.standstill)):
+      events.add(EventName.pedalPressed)
 
     # we engage when pcm is active (rising edge)
     if pcm_enable:
@@ -149,7 +131,6 @@ class CarInterfaceBase():
         events.add(EventName.pcmDisable)
 
     return events
-
 
 class RadarInterfaceBase():
   def __init__(self, CP):
@@ -163,7 +144,6 @@ class RadarInterfaceBase():
     if not self.no_radar_sleep:
       time.sleep(self.radar_ts)  # radard runs on RI updates
     return ret
-
 
 class CarStateBase:
   def __init__(self, CP):
@@ -195,13 +175,10 @@ class CarStateBase:
     return self.left_blinker_cnt > 0, self.right_blinker_cnt > 0
 
   @staticmethod
-  def parse_gear_shifter(gear: str) -> car.CarState.GearShifter:
-    d: Dict[str, car.CarState.GearShifter] = {
-        'P': GearShifter.park, 'R': GearShifter.reverse, 'N': GearShifter.neutral,
-        'E': GearShifter.eco, 'T': GearShifter.manumatic, 'D': GearShifter.drive,
-        'S': GearShifter.sport, 'L': GearShifter.low, 'B': GearShifter.brake
-    }
-    return d.get(gear, GearShifter.unknown)
+  def parse_gear_shifter(gear):
+    return {'P': GearShifter.park, 'R': GearShifter.reverse, 'N': GearShifter.neutral,
+            'E': GearShifter.eco, 'T': GearShifter.manumatic, 'D': GearShifter.drive,
+            'S': GearShifter.sport, 'L': GearShifter.low, 'B': GearShifter.brake}.get(gear, GearShifter.unknown)
 
   @staticmethod
   def get_cam_can_parser(CP):

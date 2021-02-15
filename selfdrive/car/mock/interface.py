@@ -33,8 +33,8 @@ class CarInterface(CarInterfaceBase):
     return accel
 
   @staticmethod
-  def get_params(candidate, fingerprint=gen_empty_fingerprint(), has_relay=False, car_fw=None):
-    ret = CarInterfaceBase.get_std_params(candidate, fingerprint, has_relay)
+  def get_params(candidate, fingerprint=gen_empty_fingerprint(), car_fw=None):
+    ret = CarInterfaceBase.get_std_params(candidate, fingerprint)
     ret.carName = "mock"
     ret.safetyModel = car.CarParams.SafetyModel.noOutput
     ret.mass = 1700.
@@ -48,7 +48,7 @@ class CarInterface(CarInterfaceBase):
     return ret
 
   # returns a car.CarState
-  def update(self, c, can_strings, dragonconf):
+  def update(self, c, can_strings):
     # get basic data from phone and gps since CAN isn't connected
     sensors = messaging.recv_sock(self.sensor)
     if sensors is not None:

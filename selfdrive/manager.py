@@ -1,36 +1,37 @@
 #!/usr/bin/env python3
-import datetime
-import importlib
 import os
+import time
 import sys
 import fcntl
 import errno
 import signal
 import shutil
 import subprocess
+import datetime
 import textwrap
-import time
-import traceback
-
-from multiprocessing import Process
 from typing import Dict, List
-
-import re
-from common.dp_conf import init_params_vals
-
-from common.basedir import BASEDIR
-from common.spinner import Spinner
-from common.text_window import TextWindow
-from selfdrive.hardware import HARDWARE, EON, PC
 from selfdrive.swaglog import cloudlog, add_logentries_handler
 
-os.environ['BASEDIR'] = BASEDIR
+
+from common.basedir import BASEDIR
+from common.hardware import HARDWARE, ANDROID, PC
+WEBCAM = os.getenv("WEBCAM") is not None
 sys.path.append(os.path.join(BASEDIR, "pyextra"))
+os.environ['BASEDIR'] = BASEDIR
 
 TOTAL_SCONS_NODES = 1040
-WEBCAM = os.getenv("WEBCAM") is not None
-PREBUILT = os.path.exists(os.path.join(BASEDIR, 'prebuilt'))
+prebuilt = os.path.exists(os.path.join(BASEDIR, 'prebuilt'))
 
+# Create folders needed for msgq
+try:
+  os.mkdir("/dev/shm")
+except FileExistsError:
+  pass
+except PermissionError:
+  print("WARNING: failed to make /dev/shm")
+
+if ANDROID:
+  os.chmod("/dev/shm", 0o777)
 
 def unblock_stdout():
   # get a non-blocking stdout
@@ -41,7 +42,8 @@ def unblock_stdout():
     signal.signal(signal.SIGINT, lambda signum, frame: os.kill(child_pid, signal.SIGINT))
     signal.signal(signal.SIGTERM, lambda signum, frame: os.kill(child_pid, signal.SIGTERM))
 
-    fcntl.fcntl(sys.stdout, fcntl.F_SETFL, fcntl.fcntl(sys.stdout, fcntl.F_GETFL) | os.O_NONBLOCK)
+    fcntl.fcntl(sys.stdout, fcntl.F_SETFL,
+       fcntl.fcntl(sys.stdout, fcntl.F_GETFL) | os.O_NONBLOCK)
 
     while True:
       try:
@@ -68,14 +70,18 @@ def unblock_stdout():
 if __name__ == "__main__":
   unblock_stdout()
 
+from common.spinner import Spinner
+from common.text_window import TextWindow
+
+import importlib
+import traceback
+from multiprocessing import Process
 
 # Run scons
 spinner = Spinner()
 spinner.update("0")
-if __name__ != "__main__":
-  spinner.close()
 
-def build():
+if not prebuilt:
   for retry in [True, False]:
     # run scons
     env = os.environ.copy()
@@ -83,7 +89,7 @@ def build():
     env['SCONS_CACHE'] = "1"
 
     nproc = os.cpu_count()
-    j_flag = "" if nproc is None else f"-j{nproc - 1}"
+    j_flag = "" if nproc is None else "-j%d" % (nproc - 1)
     scons = subprocess.Popen(["scons", j_flag], cwd=BASEDIR, env=env, stderr=subprocess.PIPE)
 
     compile_output = []
@@ -99,7 +105,8 @@ def build():
         prefix = b'progress: '
         if line.startswith(prefix):
           i = int(line[len(prefix):])
-          spinner.update("%d" % (70.0 * (i / TOTAL_SCONS_NODES)))
+          if spinner is not None:
+            spinner.update("%d" % (70.0 * (i / TOTAL_SCONS_NODES)))
         elif len(line):
           compile_output.append(line)
           print(line.decode('utf8', 'replace'))
@@ -118,8 +125,7 @@ def build():
             print("....%d" % i)
             time.sleep(1)
           subprocess.check_call(["scons", "-c"], cwd=BASEDIR, env=env)
-          shutil.rmtree("/tmp/scons_cache", ignore_errors=True)
-          shutil.rmtree("/data/scons_cache", ignore_errors=True)
+          shutil.rmtree("/tmp/scons_cache")
         else:
           print("scons build failed after retry")
           sys.exit(1)
@@ -131,34 +137,27 @@ def build():
         add_logentries_handler(cloudlog)
         cloudlog.error("scons build failed\n" + error_s)
 
-        try:
-          result = subprocess.check_output(["ifconfig", "wlan0"], encoding='utf8')
-          ip = re.findall(r"inet addr:((\d+\.){3}\d+)", result)[0][0]
-        except:
-          ip = 'N/A'
-
         # Show TextWindow
-        spinner.close()
         error_s = "\n \n".join(["\n".join(textwrap.wrap(e, 65)) for e in errors])
-        with TextWindow(("openpilot failed to build (IP: %s)\n \n" % ip) + error_s) as t:
+        with TextWindow("openpilot failed to build\n \n" + error_s) as t:
           t.wait_for_exit()
+
         exit(1)
     else:
       break
 
-if __name__ == "__main__" and not PREBUILT:
-  build()
-
+import cereal
 import cereal.messaging as messaging
 
-from common.params import Params, put_nonblocking
+from common.params import Params
 import selfdrive.crash as crash
 from selfdrive.registration import register
 from selfdrive.version import version, dirty
 from selfdrive.loggerd.config import ROOT
 from selfdrive.launcher import launcher
-from selfdrive.hardware.eon.apk import update_apks, pm_apply_packages, start_offroad
+from common.apk import update_apks, pm_apply_packages, start_offroad
 
+ThermalStatus = cereal.log.ThermalData.ThermalStatus
 
 # comment out anything you don't want to run
 managed_processes = {
@@ -189,9 +188,6 @@ managed_processes = {
   "dmonitoringmodeld": ("selfdrive/modeld", ["./dmonitoringmodeld"]),
   "modeld": ("selfdrive/modeld", ["./modeld"]),
   "rtshield": "selfdrive.rtshield",
-  "systemd": "selfdrive.dragonpilot.systemd",
-  "appd": "selfdrive.dragonpilot.appd",
-  "gpxd": "selfdrive.dragonpilot.gpxd",
 }
 
 daemon_processes = {
@@ -217,8 +213,6 @@ persistent_processes = [
   'ui',
   'uploader',
   'deleter',
-  'systemd',
-  'appd',
 ]
 
 if not PC:
@@ -237,11 +231,9 @@ car_started_processes = [
   'calibrationd',
   'paramsd',
   'camerad',
-  'modeld',
   'proclogd',
   'locationd',
   'clocksd',
-  'gpxd',
 ]
 
 driver_view_processes = [
@@ -250,22 +242,32 @@ driver_view_processes = [
   'dmonitoringmodeld'
 ]
 
-if not PC or WEBCAM:
+if WEBCAM:
+  car_started_processes += [
+    'dmonitoringd',
+    'dmonitoringmodeld',
+  ]
+
+if not PC:
   car_started_processes += [
     'ubloxd',
     'dmonitoringd',
     'dmonitoringmodeld',
   ]
 
-if EON:
+if ANDROID:
   car_started_processes += [
     'gpsd',
     'rtshield',
   ]
 
+# starting dmonitoringmodeld when modeld is initializing can sometimes \
+# result in a weird snpe state where dmon constantly uses more cpu than normal.
+car_started_processes += ['modeld']
 
 def register_managed_process(name, desc, car_started=False):
   global managed_processes, car_started_processes, persistent_processes
+  print("registering %s" % name)
   managed_processes[name] = desc
   if car_started:
     car_started_processes.append(name)
@@ -321,22 +323,22 @@ def start_daemon_process(name):
 
   params.put(pid_param, str(proc.pid))
 
-def prepare_managed_process(p, build=False):
+def prepare_managed_process(p):
   proc = managed_processes[p]
   if isinstance(proc, str):
     # import this python
     cloudlog.info("preimporting %s" % proc)
     importlib.import_module(proc)
-  elif os.path.isfile(os.path.join(BASEDIR, proc[0], "SConscript")) and build:
+  elif os.path.isfile(os.path.join(BASEDIR, proc[0], "Makefile")):
     # build this process
     cloudlog.info("building %s" % (proc,))
     try:
-      subprocess.check_call(["scons", "u", "-j4", "."], cwd=os.path.join(BASEDIR, proc[0]))
+      subprocess.check_call(["make", "-j4"], cwd=os.path.join(BASEDIR, proc[0]))
     except subprocess.CalledProcessError:
-      # clean and retry if the build failed
-      cloudlog.warning("building %s failed, cleaning and retrying" % (proc, ))
-      subprocess.check_call(["scons", "-u", "-c", "."], cwd=os.path.join(BASEDIR, proc[0]))
-      subprocess.check_call(["scons", "-u", "-j4", "."], cwd=os.path.join(BASEDIR, proc[0]))
+      # make clean if the build failed
+      cloudlog.warning("building %s failed, make clean" % (proc, ))
+      subprocess.check_call(["make", "clean"], cwd=os.path.join(BASEDIR, proc[0]))
+      subprocess.check_call(["make", "-j4"], cwd=os.path.join(BASEDIR, proc[0]))
 
 
 def join_process(process, timeout):
@@ -368,9 +370,11 @@ def kill_managed_process(name):
         join_process(running[name], 15)
         if running[name].exitcode is None:
           cloudlog.critical("unkillable process %s failed to die!" % name)
-          os.system("date >> /data/unkillable_reboot")
-          os.sync()
-          HARDWARE.reboot()
+          # TODO: Use method from HARDWARE
+          if ANDROID:
+            cloudlog.critical("FORCE REBOOTING PHONE!")
+            os.system("date >> /sdcard/unkillable_reboot")
+            os.system("reboot")
           raise RuntimeError
       else:
         cloudlog.info("killing %s with SIGKILL" % name)
@@ -384,7 +388,7 @@ def kill_managed_process(name):
 def cleanup_all_processes(signal, frame):
   cloudlog.info("caught ctrl-c %s %s" % (signal, frame))
 
-  if EON:
+  if ANDROID:
     pm_apply_packages('disable')
 
   for name in list(running.keys()):
@@ -404,25 +408,20 @@ def send_managed_process_signal(name, sig):
 # ****************** run loop ******************
 
 def manager_init(should_register=True):
-  # Create folders needed for msgq
-  try:
-    os.mkdir("/dev/shm")
-  except FileExistsError:
-    pass
-  except PermissionError:
-    print("WARNING: failed to make /dev/shm")
-
   if should_register:
     reg_res = register()
     if reg_res:
       dongle_id = reg_res
     else:
-      dongle_id = "c"*16
+      raise Exception("server registration failed")
   else:
     dongle_id = "c"*16
+
   # set dongle id
+  cloudlog.info("dongle id is " + dongle_id)
   os.environ['DONGLE_ID'] = dongle_id
 
+  cloudlog.info("dirty is %d" % dirty)
   if not dirty:
     os.environ['CLEAN'] = '1'
 
@@ -437,34 +436,33 @@ def manager_init(should_register=True):
     pass
 
   # ensure shared libraries are readable by apks
-  if EON:
+  if ANDROID:
     os.chmod(BASEDIR, 0o755)
-    os.chmod("/dev/shm", 0o777)
     os.chmod(os.path.join(BASEDIR, "cereal"), 0o755)
     os.chmod(os.path.join(BASEDIR, "cereal", "libmessaging_shared.so"), 0o755)
 
 def manager_thread():
+  # now loop
+  thermal_sock = messaging.sub_sock('thermal')
 
   cloudlog.info("manager start")
   cloudlog.info({"environ": os.environ})
 
+  # save boot log
+  subprocess.call(["./loggerd", "--bootlog"], cwd=os.path.join(BASEDIR, "selfdrive/loggerd"))
+
   params = Params()
 
-  # save boot log
-  if params.get("dp_logger") == b'1':
-    subprocess.call(["./loggerd", "--bootlog"], cwd=os.path.join(BASEDIR, "selfdrive/loggerd"))
-
-  if params.get("dp_athenad") == b'1':
-    # start daemon processes
-    for p in daemon_processes:
-      start_daemon_process(p)
+  # start daemon processes
+  for p in daemon_processes:
+    start_daemon_process(p)
 
   # start persistent processes
   for p in persistent_processes:
     start_managed_process(p)
 
   # start offroad
-  if EON:
+  if ANDROID:
     pm_apply_packages('enable')
     start_offroad()
 
@@ -477,8 +475,6 @@ def manager_thread():
 
   started_prev = False
   logger_dead = False
-  params = Params()
-  thermal_sock = messaging.sub_sock('thermal')
 
   while 1:
     msg = messaging.recv_sock(thermal_sock, wait=True)
@@ -509,7 +505,6 @@ def manager_thread():
 
       # trigger an update after going offroad
       if started_prev:
-        os.sync()
         send_managed_process_signal("updated", signal.SIGHUP)
 
     started_prev = msg.thermal.started
@@ -522,19 +517,33 @@ def manager_thread():
     if params.get("DoUninstall", encoding='utf8') == "1":
       break
 
-def manager_prepare():
+def manager_prepare(spinner=None):
   # build all processes
   os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
   # Spinner has to start from 70 here
-  total = 100.0 if PREBUILT else 30.0
+  total = 100.0 if prebuilt else 30.0
 
   for i, p in enumerate(managed_processes):
-    perc = (100.0 - total) + total * (i + 1) / len(managed_processes)
-    spinner.update(str(int(perc)))
+    if spinner is not None:
+      spinner.update("%d" % ((100.0 - total) + total * (i + 1) / len(managed_processes),))
     prepare_managed_process(p)
 
+def uninstall():
+  cloudlog.warning("uninstalling")
+  with open('/cache/recovery/command', 'w') as f:
+    f.write('--wipe_data\n')
+  # IPowerManager.reboot(confirm=false, reason="recovery", wait=true)
+  HARDWARE.reboot(reason="recovery")
+
 def main():
+  if ANDROID:
+    # the flippening!
+    os.system('LD_LIBRARY_PATH="" content insert --uri content://settings/system --bind name:s:user_rotation --bind value:i:1')
+
+    # disable bluetooth
+    os.system('service call bluetooth_manager 8')
+
   params = Params()
   params.manager_start()
 
@@ -559,46 +568,21 @@ def main():
     if params.get(k) is None:
       params.put(k, v)
 
-  # is this dashcam?
+  # is this chffrplus?
   if os.getenv("PASSIVE") is not None:
     params.put("Passive", str(int(os.getenv("PASSIVE"))))
 
   if params.get("Passive") is None:
     raise Exception("Passive must be set to continue")
 
-  init_params_vals(params)
-  if EON:
+  if ANDROID:
     update_apks()
-  manager_init(params.get('dp_reg') == b'1')
-  manager_prepare()
+  manager_init()
+  manager_prepare(spinner)
   spinner.close()
 
   if os.getenv("PREPAREONLY") is not None:
     return
-
-  # dp
-  del managed_processes['tombstoned']
-  steering_monitor = params.get("dp_steering_monitor") == b'1'
-  if not steering_monitor and params.get("dp_driver_monitor") == b'0':
-    del managed_processes['loggerd']
-    del managed_processes['logmessaged']
-    del managed_processes['proclogd']
-    del managed_processes['logcatd']
-    del managed_processes['dmonitoringd']
-    del managed_processes['dmonitoringmodeld']
-  elif params.get("dp_logger") == b'0' or \
-          params.get("dp_atl") == b'1' or \
-          not steering_monitor:
-    del managed_processes['loggerd']
-    del managed_processes['logmessaged']
-    del managed_processes['proclogd']
-    del managed_processes['logcatd']
-  if params.get("dp_uploader") == b'0':
-    del managed_processes['uploader']
-  if params.get("dp_updated") == b'0':
-    del managed_processes['updated']
-  if params.get('dp_gpxd') == b'0':
-    del managed_processes['gpxd']
 
   # SystemExit on sigterm
   signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(1))
@@ -612,8 +596,7 @@ def main():
     cleanup_all_processes(None, None)
 
   if params.get("DoUninstall", encoding='utf8') == "1":
-    cloudlog.warning("uninstalling")
-    HARDWARE.uninstall()
+    uninstall()
 
 
 if __name__ == "__main__":
@@ -623,16 +606,9 @@ if __name__ == "__main__":
     add_logentries_handler(cloudlog)
     cloudlog.exception("Manager failed to start")
 
-    try:
-      result = subprocess.check_output(["ifconfig", "wlan0"], encoding='utf8')
-      ip = re.findall(r"inet addr:((\d+\.){3}\d+)", result)[0][0]
-    except:
-      ip = 'N/A'
-
     # Show last 3 lines of traceback
     error = traceback.format_exc(-3)
-    error = ("Manager failed to start (IP: %s)\n \n" % ip) + error
-    spinner.close()
+    error = "Manager failed to start\n \n" + error
     with TextWindow(error) as t:
       t.wait_for_exit()
 

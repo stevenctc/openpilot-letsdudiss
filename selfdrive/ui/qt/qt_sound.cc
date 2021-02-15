@@ -18,10 +18,7 @@ bool QtSound::play(AudibleAlert alert) {
 
 void QtSound::stop() {
   for (auto &kv : sounds) {
-    // Only stop repeating sounds
-    if (sound_map[kv.first].second != 0) {
-      kv.second.stop();
-    }
+    kv.second.stop();
   }
 }
 

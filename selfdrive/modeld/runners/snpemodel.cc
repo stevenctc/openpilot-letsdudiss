@@ -1,7 +1,6 @@
 #pragma clang diagnostic ignored "-Wexceptions"
 
 #include <cassert>
-#include <string.h>
 #include <stdlib.h>
 #include "common/util.h"
 #include "snpemodel.h"

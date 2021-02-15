@@ -213,7 +213,8 @@ kj::Array<capnp::word> UbloxMsgParser::gen_solution() {
   std::time_t utc_tt = timegm(&timeinfo);
   gpsLoc.setTimestamp(utc_tt * 1e+03 + msg->nano * 1e-06);
   float f[] = { msg->velN * 1e-03f, msg->velE * 1e-03f, msg->velD * 1e-03f };
-  gpsLoc.setVNED(f);
+  kj::ArrayPtr<const float> ap(&f[0], sizeof(f) / sizeof(f[0]));
+  gpsLoc.setVNED(ap);
   gpsLoc.setVerticalAccuracy(msg->vAcc * 1e-03);
   gpsLoc.setSpeedAccuracy(msg->sAcc * 1e-03);
   gpsLoc.setBearingAccuracy(msg->headAcc * 1e-05);
@@ -317,8 +318,10 @@ kj::Array<capnp::word> UbloxMsgParser::gen_nav_data() {
       eph.setTgd(ephem_data.Tgd);
       eph.setIonoCoeffsValid(ephem_data.ionoCoeffsValid);
       if(ephem_data.ionoCoeffsValid) {
-        eph.setIonoAlpha(ephem_data.ionoAlpha);
-        eph.setIonoBeta(ephem_data.ionoBeta);
+        kj::ArrayPtr<const double> apa(&ephem_data.ionoAlpha[0], sizeof(ephem_data.ionoAlpha) / sizeof(ephem_data.ionoAlpha[0]));
+        eph.setIonoAlpha(apa);
+        kj::ArrayPtr<const double> apb(&ephem_data.ionoBeta[0], sizeof(ephem_data.ionoBeta) / sizeof(ephem_data.ionoBeta[0]));
+        eph.setIonoBeta(apb);
       } else {
         eph.setIonoAlpha(kj::ArrayPtr<const double>());
         eph.setIonoBeta(kj::ArrayPtr<const double>());

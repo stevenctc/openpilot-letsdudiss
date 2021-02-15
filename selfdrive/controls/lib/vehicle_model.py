@@ -12,13 +12,11 @@ x_dot = A*x + B*u
 
 A depends on longitudinal speed, u [m/s], and vehicle parameters CP
 """
-from typing import Tuple
-
 import numpy as np
 from numpy.linalg import solve
-
+from typing import Tuple
 from cereal import car
-from common.params import Params
+
 
 class VehicleModel:
   def __init__(self, CP: car.CarParams):
@@ -36,17 +34,13 @@ class VehicleModel:
 
     self.cF_orig = CP.tireStiffnessFront
     self.cR_orig = CP.tireStiffnessRear
-    # dp
-    self.sR_orig = CP.steerRatio
-    self.dp_sr_learner = Params().get('dp_sr_learner') == b'1'
-
     self.update_params(1.0, CP.steerRatio)
 
   def update_params(self, stiffness_factor: float, steer_ratio: float) -> None:
     """Update the vehicle model with a new stiffness factor and steer ratio"""
     self.cF = stiffness_factor * self.cF_orig
     self.cR = stiffness_factor * self.cR_orig
-    self.sR = steer_ratio if self.dp_sr_learner else self.sR_orig
+    self.sR = steer_ratio
 
   def steady_state_sol(self, sa: float, u: float) -> np.ndarray:
     """Returns the steady state solution.

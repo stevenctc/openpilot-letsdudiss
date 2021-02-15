@@ -24,10 +24,8 @@ pthread_mutex_t transform_lock;
 
 void* live_thread(void *arg) {
   set_thread_name("live");
-  set_realtime_priority(50);
 
   SubMaster sm({"liveCalibration"});
-
   /*
      import numpy as np
      from common.transformations.model import medmodel_frame_from_road_frame
@@ -62,7 +60,7 @@ void* live_thread(void *arg) {
   }}, db_s);
 
   while (!do_exit) {
-    if (sm.update(100) > 0){
+    if (sm.update(10) > 0){
 
       auto extrinsic_matrix = sm["liveCalibration"].getLiveCalibration().getExtrinsicMatrix();
       Eigen::Matrix<float, 3, 4> extrinsic_matrix_eigen;
@@ -93,7 +91,7 @@ void* live_thread(void *arg) {
 
 int main(int argc, char **argv) {
   int err;
-  set_realtime_priority(54);
+  set_realtime_priority(51);
 
 #ifdef QCOM
   set_core_affinity(2);
@@ -113,16 +111,26 @@ int main(int argc, char **argv) {
   assert(err == 0);
 
   // messaging
-  PubMaster pm({"modelV2", "model", "cameraOdometry"});
+  PubMaster pm({"model", "cameraOdometry"});
   SubMaster sm({"pathPlan", "frame"});
 
+#if defined(QCOM) || defined(QCOM2)
+  cl_device_type device_type = CL_DEVICE_TYPE_DEFAULT;
+#else
+  cl_device_type device_type = CL_DEVICE_TYPE_CPU;
+#endif
+
   // cl init
-  cl_device_id device_id = cl_get_device_id(CL_DEVICE_TYPE_DEFAULT);
-  cl_context context = CL_CHECK_ERR(clCreateContext(NULL, 1, &device_id, NULL, NULL, &err));
+  cl_device_id device_id = cl_get_device_id(device_type);
+  cl_context context = clCreateContext(NULL, 1, &device_id, NULL, NULL, &err);
+  assert(err == 0);
+
+  cl_command_queue q = clCreateCommandQueue(context, device_id, 0, &err);
+  assert(err == 0);
 
   // init the models
   ModelState model;
-  model_init(&model, device_id, context);
+  model_init(&model, device_id, context, true);
   LOGW("models loaded, modeld starting");
 
   // loop
@@ -139,7 +147,7 @@ int main(int argc, char **argv) {
 
     // setup filter to track dropped frames
     const float dt = 1. / MODEL_FREQ;
-    const float ts = 10.0;  // filter time constant (s)
+    const float ts = 5.0;  // 5 s filter time constant
     const float frame_filter_k = (dt / ts) / (1. + dt / ts);
     float frames_dropped = 0;
 
@@ -149,7 +157,6 @@ int main(int argc, char **argv) {
     uint32_t frame_id = 0, last_vipc_frame_id = 0;
     double last = 0;
     int desire = -1;
-    uint32_t run_count = 0;
     while (!do_exit) {
       VIPCBuf *buf;
       VIPCBufExtra extra;
@@ -166,14 +173,12 @@ int main(int argc, char **argv) {
 
       if (sm.update(0) > 0){
         // TODO: path planner timeout?
-        desire = ((int)sm["pathPlan"].getPathPlan().getDesire());
+        desire = ((int)sm["pathPlan"].getPathPlan().getDesire()) - 1;
         frame_id = sm["frame"].getFrame().getFrameId();
       }
 
       double mt1 = 0, mt2 = 0;
       if (run_model_this_iter) {
-        run_count++;
-
         float vec_desire[DESIRE_LEN] = {0};
         if (desire >= 0 && desire < DESIRE_LEN) {
           vec_desire[desire] = 1.0;
@@ -183,25 +188,21 @@ int main(int argc, char **argv) {
 
         // TODO: don't make copies!
         memcpy(yuv_ion.addr, buf->addr, buf_info.buf_len);
-        visionbuf_sync(&yuv_ion, VISIONBUF_SYNC_TO_DEVICE);
 
         ModelDataRaw model_buf =
-            model_eval_frame(&model, yuv_ion.buf_cl, buf_info.width, buf_info.height,
-                             model_transform, vec_desire);
+            model_eval_frame(&model, q, yuv_ion.buf_cl, buf_info.width, buf_info.height,
+                             model_transform, NULL, vec_desire);
         mt2 = millis_since_boot();
-        float model_execution_time = (mt2 - mt1) / 1000.0;
 
         // tracked dropped frames
         uint32_t vipc_dropped_frames = extra.frame_id - last_vipc_frame_id - 1;
         frames_dropped = (1. - frame_filter_k) * frames_dropped + frame_filter_k * (float)std::min(vipc_dropped_frames, 10U);
-        if (run_count < 10) frames_dropped = 0;  // let frame drops warm up
-        float frame_drop_ratio = frames_dropped / (1 + frames_dropped);
+        float frame_drop_perc = frames_dropped / MODEL_FREQ;
 
-        const float *raw_pred_ptr = send_raw_pred ? &model.output[0] : nullptr;
-        model_publish(pm, extra.frame_id, frame_id, frame_drop_ratio, model_buf, raw_pred_ptr, extra.timestamp_eof, model_execution_time);
-        posenet_publish(pm, extra.frame_id, vipc_dropped_frames, model_buf, extra.timestamp_eof);
+        model_publish(pm, extra.frame_id, frame_id,  vipc_dropped_frames, frame_drop_perc, model_buf, extra.timestamp_eof);
+        posenet_publish(pm, extra.frame_id, frame_id, vipc_dropped_frames, frame_drop_perc, model_buf, extra.timestamp_eof);
 
-        LOGD("model process: %.2fms, from last %.2fms, vipc_frame_id %zu, frame_id, %zu, frame_drop %.3f", mt2-mt1, mt1-last, extra.frame_id, frame_id, frame_drop_ratio);
+        LOGD("model process: %.2fms, from last %.2fms, vipc_frame_id %zu, frame_id, %zu, frame_drop %.3f", mt2-mt1, mt1-last, extra.frame_id, frame_id, frame_drop_perc);
         last = mt1;
         last_vipc_frame_id = extra.frame_id;
       }
@@ -216,7 +217,9 @@ int main(int argc, char **argv) {
   LOG("joining live_thread");
   err = pthread_join(live_thread_handle, NULL);
   assert(err == 0);
-  CL_CHECK(clReleaseContext(context));
+  clReleaseCommandQueue(q);
+  clReleaseContext(context);
+
   pthread_mutex_destroy(&transform_lock);
   return 0;
 }

@@ -4,16 +4,15 @@ from selfdrive.car import apply_toyota_steer_torque_limits, create_gas_command, 
 from selfdrive.car.toyota.toyotacan import create_steer_command, create_ui_command, \
                                            create_accel_command, create_acc_cancel_command, \
                                            create_fcw_command
-from selfdrive.car.toyota.values import Ecu, CAR, STATIC_MSGS, NO_STOP_TIMER_CAR, SteerLimitParams
+from selfdrive.car.toyota.values import Ecu, CAR, STATIC_MSGS, SteerLimitParams
 from opendbc.can.packer import CANPacker
-from common.dp_common import common_controller_ctrl
 
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 
 # Accel limits
 ACCEL_HYST_GAP = 0.02  # don't change accel command for small oscilalitons within this value
-ACCEL_MAX = 2.0  # 2.0 m/s2
-ACCEL_MIN = -3.5  # -3.5 m/s2
+ACCEL_MAX = 1.5  # 1.5 m/s2
+ACCEL_MIN = -3.0  # 3   m/s2
 ACCEL_SCALE = max(ACCEL_MAX, -ACCEL_MIN)
 
 def accel_hysteresis(accel, accel_steady, enabled):
@@ -39,6 +38,7 @@ class CarController():
     self.last_standstill = False
     self.standstill_req = False
 
+    self.last_fault_frame = -200
     self.steer_rate_limited = False
 
     self.fake_ecus = set()
@@ -49,12 +49,8 @@ class CarController():
 
     self.packer = CANPacker(dbc_name)
 
-    # dp
-    self.last_blinker_on = False
-    self.blinker_end_frame = 0.
-
   def update(self, enabled, CS, frame, actuators, pcm_cancel_cmd, hud_alert,
-             left_line, right_line, lead, left_lane_depart, right_lane_depart, dragonconf):
+             left_line, right_line, lead, left_lane_depart, right_lane_depart):
 
     # *** compute control surfaces ***
 
@@ -77,8 +73,12 @@ class CarController():
     apply_steer = apply_toyota_steer_torque_limits(new_steer, self.last_steer, CS.out.steeringTorqueEps, SteerLimitParams)
     self.steer_rate_limited = new_steer != apply_steer
 
-    # Cut steering while we're in a known fault state (2s)
-    if not enabled or CS.steer_state in [9, 25] or abs(CS.out.steeringRate) > 100 or (abs(CS.out.steeringAngle) > 150 and CS.CP.carFingerprint in [CAR.RAV4H, CAR.PRIUS]):
+    # only cut torque when steer state is a known fault
+    if CS.steer_state in [9, 25]:
+      self.last_fault_frame = frame
+
+    # Cut steering for 2s after fault
+    if not enabled or (frame - self.last_fault_frame < 200):
       apply_steer = 0
       apply_steer_req = 0
     else:
@@ -89,23 +89,11 @@ class CarController():
       pcm_cancel_cmd = 1
 
     # on entering standstill, send standstill request
-    if not dragonconf.dpToyotaSng and CS.out.standstill and not self.last_standstill and CS.CP.carFingerprint not in NO_STOP_TIMER_CAR:
+    if CS.out.standstill and not self.last_standstill:
       self.standstill_req = True
     if CS.pcm_acc_status != 8:
       # pcm entered standstill or it's disabled
       self.standstill_req = False
-
-    # dp
-    blinker_on = CS.out.leftBlinker or CS.out.rightBlinker
-    if not enabled:
-      self.blinker_end_frame = 0
-    if self.last_blinker_on and not blinker_on:
-      self.blinker_end_frame = frame + dragonconf.dpSignalOffDelay
-    apply_steer = common_controller_ctrl(enabled,
-                                         dragonconf,
-                                         blinker_on or frame < self.blinker_end_frame,
-                                         apply_steer, CS.out.vEgo)
-    self.last_blinker_on = blinker_on
 
     self.last_steer = apply_steer
     self.last_accel = apply_accel
@@ -132,13 +120,12 @@ class CarController():
       lead = lead or CS.out.vEgo < 12.    # at low speed we always assume the lead is present do ACC can be engaged
 
       # Lexus IS uses a different cancellation message
-      if not dragonconf.dpAtl:
-        if pcm_cancel_cmd and CS.CP.carFingerprint == CAR.LEXUS_IS:
-          can_sends.append(create_acc_cancel_command(self.packer))
-        elif CS.CP.openpilotLongitudinalControl:
-          can_sends.append(create_accel_command(self.packer, apply_accel, pcm_cancel_cmd, self.standstill_req, lead))
-        else:
-          can_sends.append(create_accel_command(self.packer, 0, pcm_cancel_cmd, False, lead))
+      if pcm_cancel_cmd and CS.CP.carFingerprint == CAR.LEXUS_IS:
+        can_sends.append(create_acc_cancel_command(self.packer))
+      elif CS.CP.openpilotLongitudinalControl:
+        can_sends.append(create_accel_command(self.packer, apply_accel, pcm_cancel_cmd, self.standstill_req, lead))
+      else:
+        can_sends.append(create_accel_command(self.packer, 0, pcm_cancel_cmd, False, lead))
 
     if (frame % 2 == 0) and (CS.CP.enableGasInterceptor):
       # send exactly zero if apply_gas is zero. Interceptor will send the max between read value and apply_gas.
@@ -160,17 +147,8 @@ class CarController():
       # forcing the pcm to disengage causes a bad fault sound so play a good sound instead
       send_ui = True
 
-    # dp
-    if dragonconf.dpToyotaLdw:
-      dragon_left_lane_depart = left_lane_depart
-      dragon_right_lane_depart = right_lane_depart
-    else:
-      dragon_left_lane_depart = False
-      dragon_right_lane_depart = False
-
-
     if (frame % 100 == 0 or send_ui) and Ecu.fwdCamera in self.fake_ecus:
-      can_sends.append(create_ui_command(self.packer, steer_alert, pcm_cancel_cmd, left_line, right_line, dragon_left_lane_depart, dragon_right_lane_depart))
+      can_sends.append(create_ui_command(self.packer, steer_alert, pcm_cancel_cmd, left_line, right_line, left_lane_depart, right_lane_depart))
 
     if frame % 100 == 0 and Ecu.dsu in self.fake_ecus:
       can_sends.append(create_fcw_command(self.packer, fcw_alert))

@@ -205,7 +205,6 @@ void* visionserver_client_thread(void* arg) {
             stream_i == VISION_STREAM_YUV_WIDE) {
           CameraBuf *b = get_camerabuf_by_type(s, (VisionStreamType)stream_i);
           rep.d.stream_acq.extra.frame_id = b->yuv_metas[idx].frame_id;
-          rep.d.stream_acq.extra.timestamp_sof = b->yuv_metas[idx].timestamp_sof;
           rep.d.stream_acq.extra.timestamp_eof = b->yuv_metas[idx].timestamp_eof;
         }
         vipc_send(fd, &rep);
@@ -304,14 +303,14 @@ void* visionserver_thread(void* arg) {
 void party(cl_device_id device_id, cl_context context) {
   VisionState state = {};
   VisionState *s = &state;
-
+  
   cameras_init(&s->cameras, device_id, context);
   cameras_open(&s->cameras);
 
   std::thread server_thread(visionserver_thread, s);
-
+  
   // priority for cameras
-  int err = set_realtime_priority(53);
+  int err = set_realtime_priority(51);
   LOG("setpriority returns %d", err);
 
   cameras_run(&s->cameras);
@@ -319,12 +318,8 @@ void party(cl_device_id device_id, cl_context context) {
   server_thread.join();
 }
 
-#ifdef QCOM
-#include "CL/cl_ext_qcom.h"
-#endif
-
 int main(int argc, char *argv[]) {
-  set_realtime_priority(53);
+  set_realtime_priority(51);
 #if defined(QCOM)
   set_core_affinity(2);
 #elif defined(QCOM2)
@@ -334,17 +329,13 @@ int main(int argc, char *argv[]) {
   signal(SIGINT, (sighandler_t)set_do_exit);
   signal(SIGTERM, (sighandler_t)set_do_exit);
 
+  int err;
+  clu_init();
   cl_device_id device_id = cl_get_device_id(CL_DEVICE_TYPE_DEFAULT);
-
-   // TODO: do this for QCOM2 too
-#if defined(QCOM)
-  const cl_context_properties props[] = {CL_CONTEXT_PRIORITY_HINT_QCOM, CL_PRIORITY_HINT_HIGH_QCOM, 0};
-  cl_context context = CL_CHECK_ERR(clCreateContext(props, 1, &device_id, NULL, NULL, &err));
-#else
-  cl_context context = CL_CHECK_ERR(clCreateContext(NULL, 1, &device_id, NULL, NULL, &err));
-#endif
+  cl_context context = clCreateContext(NULL, 1, &device_id, NULL, NULL, &err);
+  assert(err == 0);
 
   party(device_id, context);
 
-  CL_CHECK(clReleaseContext(context));
+  clReleaseContext(context);
 }

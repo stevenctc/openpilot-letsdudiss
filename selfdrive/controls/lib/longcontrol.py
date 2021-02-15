@@ -1,29 +1,29 @@
 from cereal import log
 from common.numpy_fast import clip, interp
 from selfdrive.controls.lib.pid import PIController
-from common.params import Params
-from selfdrive.controls.lib.dynamic_gas import DynamicGas
 
 LongCtrlState = log.ControlsState.LongControlState
 
 STOPPING_EGO_SPEED = 0.5
-STOPPING_TARGET_SPEED_OFFSET = 0.01
+MIN_CAN_SPEED = 0.3  # TODO: parametrize this in car interface
+STOPPING_TARGET_SPEED = MIN_CAN_SPEED + 0.01
 STARTING_TARGET_SPEED = 0.5
 BRAKE_THRESHOLD_TO_PID = 0.2
 
+STOPPING_BRAKE_RATE = 0.2  # brake_travel/s while trying to stop
+STARTING_BRAKE_RATE = 0.8  # brake_travel/s while releasing on restart
 BRAKE_STOPPING_TARGET = 0.5  # apply at least this amount of brake to maintain the vehicle stationary
 
 RATE = 100.0
 
 
 def long_control_state_trans(active, long_control_state, v_ego, v_target, v_pid,
-                             output_gb, brake_pressed, cruise_standstill, min_speed_can):
+                             output_gb, brake_pressed, cruise_standstill):
   """Update longitudinal control state machine"""
-  stopping_target_speed = min_speed_can + STOPPING_TARGET_SPEED_OFFSET
   stopping_condition = (v_ego < 2.0 and cruise_standstill) or \
                        (v_ego < STOPPING_EGO_SPEED and
-                        ((v_pid < stopping_target_speed and v_target < stopping_target_speed) or
-                         brake_pressed))
+                        ((v_pid < STOPPING_TARGET_SPEED and v_target < STOPPING_TARGET_SPEED) or
+                        brake_pressed))
 
   starting_condition = v_target > STARTING_TARGET_SPEED and not cruise_standstill
 
@@ -62,36 +62,27 @@ class LongControl():
                             convert=compute_gb)
     self.v_pid = 0.0
     self.last_output_gb = 0.0
-    #dynamic_gas
-    params = Params()
-    self.dp_dynamic_gas = (params.get('dp_dynamic_gas') == b'1')
-    if self.dp_dynamic_gas:
-      self.dynamic_gas = DynamicGas(CP)
 
   def reset(self, v_pid):
     """Reset PID controller and change setpoint"""
     self.pid.reset()
     self.v_pid = v_pid
 
-  def update(self, active, CS, v_target, v_target_future, a_target, CP, sm):
+  def update(self, active, CS, v_target, v_target_future, a_target, CP):
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
     # Actuation limits
     gas_max = interp(CS.vEgo, CP.gasMaxBP, CP.gasMaxV)
     brake_max = interp(CS.vEgo, CP.brakeMaxBP, CP.brakeMaxV)
 
-    #dynamic_gas
-    if self.dp_dynamic_gas:
-      gas_max = self.dynamic_gas.update(CS, sm)
-
     # Update state machine
     output_gb = self.last_output_gb
     self.long_control_state = long_control_state_trans(active, self.long_control_state, CS.vEgo,
                                                        v_target_future, self.v_pid, output_gb,
-                                                       CS.brakePressed, CS.cruiseState.standstill, CP.minSpeedCan)
+                                                       CS.brakePressed, CS.cruiseState.standstill)
 
-    v_ego_pid = max(CS.vEgo, CP.minSpeedCan)  # Without this we get jumps, CAN bus reports 0 when speed < 0.3
+    v_ego_pid = max(CS.vEgo, MIN_CAN_SPEED)  # Without this we get jumps, CAN bus reports 0 when speed < 0.3
 
-    if self.long_control_state == LongCtrlState.off or CS.gasPressed or CS.brakePressed:
+    if self.long_control_state == LongCtrlState.off or CS.gasPressed:
       self.reset(v_ego_pid)
       output_gb = 0.
 
@@ -115,7 +106,7 @@ class LongControl():
     elif self.long_control_state == LongCtrlState.stopping:
       # Keep applying brakes until the car is stopped
       if not CS.standstill or output_gb > -BRAKE_STOPPING_TARGET:
-        output_gb -= CP.stoppingBrakeRate / RATE
+        output_gb -= STOPPING_BRAKE_RATE / RATE
       output_gb = clip(output_gb, -brake_max, gas_max)
 
       self.reset(CS.vEgo)
@@ -123,7 +114,7 @@ class LongControl():
     # Intention is to move again, release brake fast before handing control to PID
     elif self.long_control_state == LongCtrlState.starting:
       if output_gb < -0.2:
-        output_gb += CP.startingBrakeRate / RATE
+        output_gb += STARTING_BRAKE_RATE / RATE
       self.reset(CS.vEgo)
 
     self.last_output_gb = output_gb

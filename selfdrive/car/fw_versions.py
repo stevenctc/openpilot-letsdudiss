@@ -59,6 +59,9 @@ TOYOTA_VERSION_RESPONSE = b'\x5a\x88\x01'
 OBD_VERSION_REQUEST = b'\x09\x04'
 OBD_VERSION_RESPONSE = b'\x49\x04'
 
+SUBARU_VERSION_REQUEST = b'\x22\xf1\x82'
+SUBARU_VERSION_RESPONSE = b'\x62\xf1\x82'
+
 
 # supports subaddressing, request, response
 REQUESTS = [
@@ -99,7 +102,13 @@ REQUESTS = [
     "toyota",
     [TESTER_PRESENT_REQUEST, DEFAULT_DIAGNOSTIC_REQUEST, EXTENDED_DIAGNOSTIC_REQUEST, UDS_VERSION_REQUEST],
     [TESTER_PRESENT_RESPONSE, DEFAULT_DIAGNOSTIC_RESPONSE, EXTENDED_DIAGNOSTIC_RESPONSE, UDS_VERSION_RESPONSE],
-  )
+  ),
+  # Subaru
+  (
+    "subaru",
+    [TESTER_PRESENT_REQUEST, SUBARU_VERSION_REQUEST],
+    [TESTER_PRESENT_RESPONSE, SUBARU_VERSION_RESPONSE],
+  ),
 ]
 
 
@@ -127,8 +136,8 @@ def match_fw_to_car(fw_versions):
       if ecu_type == Ecu.esp and candidate in [TOYOTA.RAV4, TOYOTA.COROLLA, TOYOTA.HIGHLANDER] and found_version is None:
         continue
 
-      # TODO: on some toyota, the engine can show on two different addresses
-      if ecu_type == Ecu.engine and candidate in [TOYOTA.COROLLA_TSS2, TOYOTA.CHR, TOYOTA.LEXUS_IS] and found_version is None:
+      # TODO: COROLLA_TSS2 engine can show on two different addresses
+      if ecu_type == Ecu.engine and candidate in [TOYOTA.COROLLA_TSS2, TOYOTA.CHR] and found_version is None:
         continue
 
       # ignore non essential ecus
@@ -208,6 +217,7 @@ if __name__ == "__main__":
   from selfdrive.car.vin import get_vin
 
   parser = argparse.ArgumentParser(description='Get firmware version of ECUs')
+  parser.add_argument('--hex', action='store_true')
   parser.add_argument('--scan', action='store_true')
   parser.add_argument('--debug', action='store_true')
   args = parser.parse_args()
@@ -225,7 +235,7 @@ if __name__ == "__main__":
       extra[(Ecu.unknown, 0x750, i)] = []
     extra = {"any": {"debug": extra}}
 
-  time.sleep(1.)
+  time.sleep(10.)
 
   t = time.time()
   print("Getting vin...")
@@ -243,7 +253,10 @@ if __name__ == "__main__":
   print("{")
   for version in fw_vers:
     subaddr = None if version.subAddress == 0 else hex(version.subAddress)
-    print(f"  (Ecu.{version.ecu}, {hex(version.address)}, {subaddr}): [{version.fwVersion}]")
+    if args.hex:
+      print(f"  (Ecu.{version.ecu}, {hex(version.address)}, {subaddr}): [b'%s']" % (''.join(r'\x{:02x}'.format(x) for x in version.fwVersion)))
+    else:
+      print(f"  (Ecu.{version.ecu}, {hex(version.address)}, {subaddr}): [{version.fwVersion}]")
   print("}")
 
   print()

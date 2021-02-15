@@ -6,18 +6,15 @@ from common.realtime import DT_CTRL
 from selfdrive.swaglog import cloudlog
 from selfdrive.config import Conversions as CV
 from selfdrive.controls.lib.events import ET
-from selfdrive.car.honda.values import CruiseButtons, CAR, HONDA_BOSCH, Ecu, ECU_FINGERPRINT, FINGERPRINTS
-from selfdrive.car import STD_CARGO_KG, CivicParams, scale_rot_inertia, scale_tire_stiffness, is_ecu_disconnected, gen_empty_fingerprint
+from selfdrive.car.honda.values import CruiseButtons, CAR, HONDA_BOSCH
+from selfdrive.car import STD_CARGO_KG, CivicParams, scale_rot_inertia, scale_tire_stiffness, gen_empty_fingerprint
 from selfdrive.controls.lib.planner import _A_CRUISE_MAX_V_FOLLOWING
 from selfdrive.car.interfaces import CarInterfaceBase
-from common.dp_common import common_interface_atl, common_interface_get_params_lqr
-from common.params import Params
 
 A_ACC_MAX = max(_A_CRUISE_MAX_V_FOLLOWING)
 
 ButtonType = car.CarState.ButtonEvent.Type
 EventName = car.CarEvent.EventName
-
 
 def compute_gb_honda(accel, speed):
   creep_brake = 0.0
@@ -122,20 +119,18 @@ class CarInterface(CarInterfaceBase):
     return float(max(max_accel, a_target / A_ACC_MAX)) * min(speedLimiter, accelLimiter)
 
   @staticmethod
-  def get_params(candidate, fingerprint=gen_empty_fingerprint(), has_relay=False, car_fw=[]):  # pylint: disable=dangerous-default-value
-    ret = CarInterfaceBase.get_std_params(candidate, fingerprint, has_relay)
+  def get_params(candidate, fingerprint=gen_empty_fingerprint(), car_fw=[]):  # pylint: disable=dangerous-default-value
+    ret = CarInterfaceBase.get_std_params(candidate, fingerprint)
     ret.carName = "honda"
-    ret.lateralTuning.init('pid')
 
     if candidate in HONDA_BOSCH:
-      ret.safetyModel = car.CarParams.SafetyModel.hondaBoschHarness if has_relay else car.CarParams.SafetyModel.hondaBoschGiraffe
-      rdr_bus = 0 if has_relay else 2
-      ret.enableCamera = is_ecu_disconnected(fingerprint[rdr_bus], FINGERPRINTS, ECU_FINGERPRINT, candidate, Ecu.fwdCamera) or has_relay
+      ret.safetyModel = car.CarParams.SafetyModel.hondaBoschHarness
+      ret.enableCamera = True
       ret.radarOffCan = True
       ret.openpilotLongitudinalControl = False
     else:
       ret.safetyModel = car.CarParams.SafetyModel.hondaNidec
-      ret.enableCamera = is_ecu_disconnected(fingerprint[0], FINGERPRINTS, ECU_FINGERPRINT, candidate, Ecu.fwdCamera) or has_relay
+      ret.enableCamera = True
       ret.enableGasInterceptor = 0x201 in fingerprint[0]
       ret.openpilotLongitudinalControl = ret.enableCamera
 
@@ -257,7 +252,7 @@ class CarInterface(CarInterfaceBase):
         # stock request output values:    0x0000, 0x0500, 0x0A15, 0x0E6D, 0x1100, 0x1200, 0x129A, 0x134D, 0x1400
         # modified request output values: 0x0000, 0x0500, 0x0A15, 0x0E6D, 0x1100, 0x1200, 0x1ACD, 0x239A, 0x2800
         ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 2560, 10000], [0, 2560, 3840]]
-        ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.21], [0.07]]
+        ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.3], [0.1]]
       else:
         ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 3840], [0, 3840]]
         ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.64], [0.192]]
@@ -300,20 +295,6 @@ class CarInterface(CarInterfaceBase):
       stop_and_go = False
       ret.mass = 3125 * CV.LB_TO_KG + STD_CARGO_KG
       ret.wheelbase = 2.61
-      ret.centerToFront = ret.wheelbase * 0.41
-      ret.steerRatio = 15.2
-      ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 4096], [0, 4096]]
-      tire_stiffness_factor = 0.5
-      ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.16], [0.025]]
-      ret.longitudinalTuning.kpBP = [0., 5., 35.]
-      ret.longitudinalTuning.kpV = [1.2, 0.8, 0.5]
-      ret.longitudinalTuning.kiBP = [0., 35.]
-      ret.longitudinalTuning.kiV = [0.18, 0.12]
-
-    elif candidate == CAR.JADE:
-      stop_and_go = False
-      ret.mass = 1557. + STD_CARGO_KG
-      ret.wheelbase = 2.76
       ret.centerToFront = ret.wheelbase * 0.41
       ret.steerRatio = 15.2
       ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 4096], [0, 4096]]
@@ -426,26 +407,6 @@ class CarInterface(CarInterfaceBase):
     else:
       raise ValueError("unsupported car %s" % candidate)
 
-    # dp
-    if Params().get('dp_honda_eps_mod') == b'1':
-      if candidate == CAR.CIVIC:
-        ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 2566, 8000], [0, 2566, 3840]]
-        ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.32], [0.1]] #2.5x tuned by @CFranHonda
-      elif candidate in (CAR.CIVIC_BOSCH, CAR.CIVIC_BOSCH_DIESEL):
-        ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 2564, 8000], [0, 2564, 3840]]
-        ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.32], [0.1]] #2.5 default mod #TMG put your values here
-      elif candidate in (CAR.ACCORD, CAR.ACCORD_15, CAR.ACCORDH):
-        ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.3], [0.09]]
-      elif candidate == CAR.CRV_5G:
-        ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 2560, 10000], [0, 2560, 3840]] #tuned by Titanminer (8000)
-        ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.21], [0.07]]
-      elif candidate == CAR.CRV_HYBRID:
-        ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0x0, 0xB5, 0x161, 0x2D6, 0x4C0, 0x70D, 0xC42, 0x1058, 0x2C00], [0x0, 0x160, 0x1F0, 0x2E0, 0x378, 0x4A0, 0x5F0, 0x804, 0xF00]]
-        ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.21], [0.07]] #still needs to finish tuning for the new car
-        ret.lateralTuning.pid.kf = 0.00004
-
-    ret = common_interface_get_params_lqr(ret)
-
     # min speed to enable ACC. if car can do stop and go, then set enabling speed
     # to a negative value, so it won't matter. Otherwise, add 0.5 mph margin to not
     # conflict with PCM acc
@@ -475,7 +436,7 @@ class CarInterface(CarInterfaceBase):
     return ret
 
   # returns a car.CarState
-  def update(self, c, can_strings, dragonconf):
+  def update(self, c, can_strings):
     # ******************* do can recv *******************
     self.cp.update_strings(can_strings)
     self.cp_cam.update_strings(can_strings)
@@ -483,18 +444,13 @@ class CarInterface(CarInterfaceBase):
       self.cp_body.update_strings(can_strings)
 
     ret = self.CS.update(self.cp, self.cp_cam, self.cp_body)
-    # dp
-    self.dragonconf = dragonconf
-    ret.cruiseState.enabled = common_interface_atl(ret, dragonconf.dpAtl)
+
     ret.canValid = self.cp.can_valid and self.cp_cam.can_valid and (self.cp_body is None or self.cp_body.can_valid)
     ret.yawRate = self.VM.yaw_rate(ret.steeringAngle * CV.DEG_TO_RAD, ret.vEgo)
     # FIXME: read sendcan for brakelights
     brakelights_threshold = 0.02 if self.CS.CP.carFingerprint == CAR.CIVIC else 0.1
     ret.brakeLights = bool(self.CS.brake_switch or
-                           (self.CP.openpilotLongitudinalControl and c.actuators.brake > brakelights_threshold))
-
-    # dp
-    ret.lkMode = self.CS.lkMode
+                           c.actuators.brake > brakelights_threshold)
 
     buttonEvents = []
 
@@ -534,8 +490,6 @@ class CarInterface(CarInterfaceBase):
 
     # events
     events = self.create_common_events(ret, pcm_enable=False)
-    if not self.CS.lkMode or (dragonconf.dpAtl and ret.vEgo <= self.CP.minEnableSpeed):
-      events.add(EventName.manualSteeringRequired)
     if self.CS.brake_error:
       events.add(EventName.brakeUnavailable)
     if self.CS.brake_hold and self.CS.CP.openpilotLongitudinalControl:
@@ -552,8 +506,8 @@ class CarInterface(CarInterfaceBase):
        and (c.actuators.brake <= 0. or not self.CP.openpilotLongitudinalControl):
       # non loud alert if cruise disables below 25mph as expected (+ a little margin)
       if ret.vEgo < self.CP.minEnableSpeed + 2.:
-      #   events.add(EventName.speedTooLow)
-      # else:
+        events.add(EventName.speedTooLow)
+      else:
         events.add(EventName.cruiseDisabled)
     if self.CS.CP.minEnableSpeed > 0 and ret.vEgo < 0.001:
       events.add(EventName.manualRestart)
@@ -609,7 +563,6 @@ class CarInterface(CarInterfaceBase):
                                pcm_accel,
                                hud_v_cruise,
                                c.hudControl.lanesVisible,
-                               self.dragonconf,
                                hud_show_car=c.hudControl.leadVisible,
                                hud_alert=c.hudControl.visualAlert)
 

@@ -22,8 +22,11 @@ void dmonitoring_init(DMonitoringModelState* s) {
 #else
   const char* model_path = "../../models/dmonitoring_model.dlc";
 #endif
-
+#ifdef QCOM2
+  int runtime = USE_CPU_RUNTIME;
+#else
   int runtime = USE_DSP_RUNTIME;
+#endif
   s->m = new DefaultRunModel(model_path, (float*)&s->output, OUTPUT_SIZE, runtime);
   s->is_rhd = Params().read_db_bool("IsRHD");
 }
@@ -52,7 +55,7 @@ DMonitoringResult dmonitoring_eval_frame(DMonitoringModelState* s, void* stream_
 #else
   const int full_width_tici = 1928;
   const int full_height_tici = 1208;
-  const int adapt_width_tici = 636;
+  const int adapt_width_tici = 808;
 
   const int cropped_height = adapt_width_tici / 1.33;
   const int cropped_width = cropped_height / 2;
@@ -111,39 +114,24 @@ DMonitoringResult dmonitoring_eval_frame(DMonitoringModelState* s, void* stream_
                     resized_width, resized_height,
                     mode);
 
-  // prerotate to be cache aware
-  uint8_t *resized_buf_rot = get_buffer(s->resized_buf_rot, resized_width*resized_height*3/2);
-  uint8_t *resized_y_buf_rot = resized_buf_rot;
-  uint8_t *resized_u_buf_rot = resized_y_buf_rot + (resized_width * resized_height);
-  uint8_t *resized_v_buf_rot = resized_u_buf_rot + ((resized_width/2) * (resized_height/2));
-
-  libyuv::I420Rotate(resized_y_buf, resized_width,
-                     resized_u_buf, resized_width/2,
-                     resized_v_buf, resized_width/2,
-                     resized_y_buf_rot, resized_height,
-                     resized_u_buf_rot, resized_height/2,
-                     resized_v_buf_rot, resized_height/2,
-                     // negative height causes a vertical flip to match previous
-                     resized_width, -resized_height, libyuv::kRotate90);
-
   int yuv_buf_len = (MODEL_WIDTH/2) * (MODEL_HEIGHT/2) * 6; // Y|u|v -> y|y|y|y|u|v
   float *net_input_buf = get_buffer(s->net_input_buf, yuv_buf_len);
   // one shot conversion, O(n) anyway
   // yuvframe2tensor, normalize
-  for (int c = 0; c < MODEL_WIDTH/2; c++) {
-    for (int r = 0; r < MODEL_HEIGHT/2; r++) {
+  for (int r = 0; r < MODEL_HEIGHT/2; r++) {
+    for (int c = 0; c < MODEL_WIDTH/2; c++) {
       // Y_ul
-      net_input_buf[(c*MODEL_HEIGHT/2) + r + (0*(MODEL_WIDTH/2)*(MODEL_HEIGHT/2))] = input_lambda(resized_buf_rot[(2*r) + (2*c)*resized_height]);
-      // Y_dl
-      net_input_buf[(c*MODEL_HEIGHT/2) + r + (1*(MODEL_WIDTH/2)*(MODEL_HEIGHT/2))] = input_lambda(resized_buf_rot[(2*r+1) + (2*c)*resized_height]);
+      net_input_buf[(c*MODEL_HEIGHT/2) + r] = input_lambda(resized_buf[(2*r*resized_width) + (2*c)]);
       // Y_ur
-      net_input_buf[(c*MODEL_HEIGHT/2) + r + (2*(MODEL_WIDTH/2)*(MODEL_HEIGHT/2))] = input_lambda(resized_buf_rot[(2*r) + (2*c+1)*resized_height]);
+      net_input_buf[(c*MODEL_HEIGHT/2) + r + (2*(MODEL_WIDTH/2)*(MODEL_HEIGHT/2))] = input_lambda(resized_buf[(2*r*resized_width) + (2*c+1)]);
+      // Y_dl
+      net_input_buf[(c*MODEL_HEIGHT/2) + r + ((MODEL_WIDTH/2)*(MODEL_HEIGHT/2))] = input_lambda(resized_buf[(2*r*resized_width+1) + (2*c)]);
       // Y_dr
-      net_input_buf[(c*MODEL_HEIGHT/2) + r + (3*(MODEL_WIDTH/2)*(MODEL_HEIGHT/2))] = input_lambda(resized_buf_rot[(2*r+1) + (2*c+1)*resized_height]);
+      net_input_buf[(c*MODEL_HEIGHT/2) + r + (3*(MODEL_WIDTH/2)*(MODEL_HEIGHT/2))] = input_lambda(resized_buf[(2*r*resized_width+1) + (2*c+1)]);
       // U
-      net_input_buf[(c*MODEL_HEIGHT/2) + r + (4*(MODEL_WIDTH/2)*(MODEL_HEIGHT/2))] = input_lambda(resized_buf_rot[(resized_width*resized_height) + r + (c*resized_height/2)]);
+      net_input_buf[(c*MODEL_HEIGHT/2) + r + (4*(MODEL_WIDTH/2)*(MODEL_HEIGHT/2))] = input_lambda(resized_buf[(resized_width*resized_height) + (r*resized_width/2) + c]);
       // V
-      net_input_buf[(c*MODEL_HEIGHT/2) + r + (5*(MODEL_WIDTH/2)*(MODEL_HEIGHT/2))] = input_lambda(resized_buf_rot[(resized_width*resized_height) + ((resized_width/2)*(resized_height/2)) + r + (c*resized_height/2)]);
+      net_input_buf[(c*MODEL_HEIGHT/2) + r + (5*(MODEL_WIDTH/2)*(MODEL_HEIGHT/2))] = input_lambda(resized_buf[(resized_width*resized_height) + ((resized_width/2)*(resized_height/2)) + (r*resized_width/2) + c]);
     }
   }
 
@@ -152,17 +140,11 @@ DMonitoringResult dmonitoring_eval_frame(DMonitoringModelState* s, void* stream_
   //fwrite(raw_buf, height*width*3/2, sizeof(uint8_t), dump_yuv_file);
   //fclose(dump_yuv_file);
 
-  // *** testing ***
-  // idat = np.frombuffer(open("/tmp/inputdump.yuv", "rb").read(), np.float32).reshape(6, 160, 320)
-  // imshow(cv2.cvtColor(tensor_to_frames(idat[None]/0.0078125+128)[0], cv2.COLOR_YUV2RGB_I420))
-
   //FILE *dump_yuv_file2 = fopen("/tmp/inputdump.yuv", "wb");
   //fwrite(net_input_buf, MODEL_HEIGHT*MODEL_WIDTH*3/2, sizeof(float), dump_yuv_file2);
   //fclose(dump_yuv_file2);
 
-  double t1 = millis_since_boot();
   s->m->execute(net_input_buf, yuv_buf_len);
-  double t2 = millis_since_boot();
 
   DMonitoringResult ret = {0};
   memcpy(&ret.face_orientation, &s->output[0], sizeof ret.face_orientation);
@@ -180,31 +162,29 @@ DMonitoringResult dmonitoring_eval_frame(DMonitoringModelState* s, void* stream_
   ret.face_orientation_meta[2] = softplus(ret.face_orientation_meta[2]);
   ret.face_position_meta[0] = softplus(ret.face_position_meta[0]);
   ret.face_position_meta[1] = softplus(ret.face_position_meta[1]);
-  ret.dsp_execution_time = (t2 - t1) / 1000.;
   return ret;
 }
 
-void dmonitoring_publish(PubMaster &pm, uint32_t frame_id, const DMonitoringResult &res, const float* raw_pred, float execution_time){
+void dmonitoring_publish(PubMaster &pm, uint32_t frame_id, const DMonitoringResult &res){
   // make msg
   MessageBuilder msg;
   auto framed = msg.initEvent().initDriverState();
   framed.setFrameId(frame_id);
-  framed.setModelExecutionTime(execution_time);
-  framed.setDspExecutionTime(res.dsp_execution_time);
 
-  framed.setFaceOrientation(res.face_orientation);
-  framed.setFaceOrientationStd(res.face_orientation_meta);
-  framed.setFacePosition(res.face_position);
-  framed.setFacePositionStd(res.face_position_meta);
+  kj::ArrayPtr<const float> face_orientation(&res.face_orientation[0], ARRAYSIZE(res.face_orientation));
+  kj::ArrayPtr<const float> face_orientation_std(&res.face_orientation_meta[0], ARRAYSIZE(res.face_orientation_meta));
+  kj::ArrayPtr<const float> face_position(&res.face_position[0], ARRAYSIZE(res.face_position));
+  kj::ArrayPtr<const float> face_position_std(&res.face_position_meta[0], ARRAYSIZE(res.face_position_meta));
+  framed.setFaceOrientation(face_orientation);
+  framed.setFaceOrientationStd(face_orientation_std);
+  framed.setFacePosition(face_position);
+  framed.setFacePositionStd(face_position_std);
   framed.setFaceProb(res.face_prob);
   framed.setLeftEyeProb(res.left_eye_prob);
   framed.setRightEyeProb(res.right_eye_prob);
   framed.setLeftBlinkProb(res.left_blink_prob);
   framed.setRightBlinkProb(res.right_blink_prob);
   framed.setSgProb(res.sg_prob);
-  if (send_raw_pred) {
-    framed.setRawPred(kj::arrayPtr((const uint8_t*)raw_pred, OUTPUT_SIZE*sizeof(float)));
-  }
 
   pm.send("driverState", msg);
 }
