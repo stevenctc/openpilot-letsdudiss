@@ -40,7 +40,7 @@ cdef class CANParser:
     self.dbc_name = dbc_name
     self.dbc = dbc_lookup(dbc_name)
     if not self.dbc:
-      raise RuntimeError("Can't lookup" + dbc_name)
+      raise RuntimeError("Can't lookup " + dbc_name)
     self.vl = {}
     self.ts = {}
 
